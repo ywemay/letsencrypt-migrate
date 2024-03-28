@@ -1,0 +1,141 @@
+#!/bin/bash
+origin_dir="/etc/letsencrypt"
+src_dir=$origin_dir
+site_name=""
+destination=""
+port="22"
+force=0
+
+show_help() {
+  cat << EOF
+Helps to copy letsencrypt certificates from one machine to another.
+Usage:
+  ./migrate site.host username@remote[:/home/username]
+
+Options:
+  -p|--port             Remote ssh port, defaults to $port
+  -s|--dir-src          Lets encrypt source directory, defaults to $src_dir
+    --letsencrypt-src 
+
+Example:
+  ./migrate example.net ${USER}@192.168.0.12:/home/${USER}
+EOF
+}
+
+while [ "$1" != "" ]; do
+  case $1 in
+    -p|--port)
+      shift
+      port=$1
+      shift
+      ;;
+    -s|--dir-src|--letsencrypt-dir)
+      shift
+      src_dir=$1
+      shift
+      ;;
+    -f|--force)
+      force=1
+      shift
+      ;;
+    *)
+      if [ "$site_name" = "" ]; then
+        site_name=$1;
+        shift
+      elif [ "$destination" = "" ]; then
+        destination=$1;
+        shift
+      else
+        echo "Invalid option: $1" >&2
+        show_help
+        exit 1
+      fi
+      ;;
+  esac
+done
+
+if [ "$site_name" = "" ]; then
+  show_help
+  exit 1
+elif [ "$destination" = "" ]; then
+  show_help
+  exit 1
+fi
+
+archive_name="${site_name}.tar.gz"
+certs_location="${origin_dir}/archive/${site_name}"
+live_location="${origin_dir}/live/${site_name}"
+conf_location="${origin_dir}/renewal/${site_name}.conf"
+
+if [ "$origin_dir" = "$src_dir" ]; then
+  echo "Good to go"
+else 
+  certs_location_other="${src_dir}/archive/${site_name}"
+  conf_location_other="${src_dir}/renewal/${site_name}.conf"
+  # sudo rm -f "$certs_location"
+  sudo mkdir -p "$certs_location"
+  sudo mkdir -p "$origin_dir/renewal"
+  sudo cp -r "$certs_location_other" "$origin_dir/archive/"
+  sudo cp "$conf_location_other" "$conf_location"
+  # cleanup="required" 
+fi
+
+if [ ! -d "$certs_location" ]; then
+  echo "Cannot find certification directory $certs_location..."
+  exit 1;
+fi
+
+if [ -f "$archive_name" ]; then
+  if [ $force -eq 1 ]; then
+    rm "$archive_name"
+  else
+    echo "File $archive_name already exists. Use -f switch to re-archive."
+    exit 1;
+  fi
+fi
+
+user_name=$(echo $destination | cut -d@ -f1)
+remote_host=$(echo $destination | cut -d@ -f2)
+remote_path=$(echo $remote_host | cut -d: -f2)
+remote_host=$(echo $remote_host | cut -d: -f1)
+
+if [ "$remote_host" = "$remote_path" ]; then
+  remote_path="/home/$user_name"
+fi
+
+echo "Parts: $user_name, $remote_host, $remote_path ..."
+# compress certificates and configuration
+sudo tar -chzf "$archive_name" "$certs_location" "$conf_location"
+
+destination="$user_name@$remote_host:$remote_path/."
+
+echo "Post processing on destination, decompress and create symbolic links..."
+
+install_script="$site_name.install.sh"
+
+cat > $install_script << EOF
+cd /
+sudo mkdir -p "$certs_location"
+sudo mkdir -p "$live_location"
+sudo tar -xvf $remote_path/$archive_name
+sudo ln -s /etc/letsencrypt/archive/${site_name}/cert2.pem /etc/letsencrypt/live/${site_name}/cert.pem
+sudo ln -s /etc/letsencrypt/archive/${site_name}/chain2.pem /etc/letsencrypt/live/${site_name}/chain.pem
+sudo ln -s /etc/letsencrypt/archive/${site_name}/fullchain2.pem /etc/letsencrypt/live/${site_name}/fullchain.pem
+sudo ln -s /etc/letsencrypt/archive/${site_name}/privkey2.pem /etc/letsencrypt/live/${site_name}/privkey.pem
+EOF
+
+echo "Copy archive $archive_name, $install_script to $destination ..."
+scp -P "$port" "$archive_name" "$destination"
+scp -P "$port" "$install_script" "$destination"
+
+cat << EOF
+Lets login on remote and execute:
+
+  bash $install_script
+
+EOF
+
+remote="$user_name@$remote_host"
+
+ssh -p "$port" $remote 
+# "cd $remote_path && bash $install_script"
